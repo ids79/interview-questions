@@ -2,14 +2,20 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/rand"
 	"sync"
 	"time"
 )
 
-var errTimeout = errors.New("timed out")
+type MyContext struct {
+	context.Context
+	done chan struct{}
+}
+
+func (c MyContext) Done() <-chan struct{} {
+	return c.done
+}
 
 var processData = func(v int) int {
 	time.Sleep(time.Duration(rand.Intn(10)) * time.Second)
@@ -20,7 +26,11 @@ func main() {
 	in := make(chan int)
 	out := make(chan int)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	c, myCancel := context.WithCancel(context.Background())
+	defer myCancel()
+	cc := MyContext{Context: c, done: make(chan struct{})}
+
+	ctx, cancel := context.WithTimeout(cc, 5*time.Second)
 	defer cancel()
 
 	go func() {
@@ -28,6 +38,7 @@ func main() {
 		for i := range 10 {
 			select {
 			case <-ctx.Done():
+				return
 			case in <- i:
 			}
 		}
@@ -46,19 +57,23 @@ func processParallel(ctx context.Context, in <-chan int, out chan<- int, numWork
 	wg := sync.WaitGroup{}
 	for range numWorkers {
 		wg.Go(func() {
-			select {
-			case <-ctx.Done():
-			case val, ok := <-in:
-				if !ok {
-					return
-				}
-				res, err := wrapFunc(ctx, processData, val)
-				if errors.Is(err, errTimeout) {
-					return
-				}
+			for {
 				select {
 				case <-ctx.Done():
-				case out <- res:
+					return
+				case val, ok := <-in:
+					if !ok {
+						return
+					}
+					res, err := wrapFunc(ctx, processData, val)
+					if err != nil {
+						return
+					}
+					select {
+					case <-ctx.Done():
+						return
+					case out <- res:
+					}
 				}
 			}
 		})
@@ -70,16 +85,14 @@ func processParallel(ctx context.Context, in <-chan int, out chan<- int, numWork
 }
 
 func wrapFunc(ctx context.Context, f func(v int) int, val int) (int, error) {
-	result := make(chan struct{})
-	var res int
+	result := make(chan int, 1)
 	go func() {
-		res = f(val)
-		close(result)
+		result <- f(val)
 	}()
 	select {
 	case <-ctx.Done():
-		return 0, errTimeout
-	case <-result:
+		return 0, ctx.Err()
+	case res := <-result:
 		return res, nil
 	}
 }
