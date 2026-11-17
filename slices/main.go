@@ -5,6 +5,8 @@ import (
 	"runtime/metrics"
 )
 
+//nil slice - можно добавлять, нельзя читать
+
 func main() {
 	append1()
 	append2()
